@@ -1,0 +1,9 @@
+{
+  "version": "2.0",
+  "rawPath": "/",
+  "rawQueryString": "token=disposable-query-token",
+  "headers": {"content-type":"application/json", "access_token":"disposable-local-token"},
+  "requestContext": {"http":{"method":"POST", "sourceIp":"9.9.9.9"}},
+  "body": "{\"text\":[\"WAN: IP-Address=9.9.9.9\",\"A non-IP diagnostic message\"],\"shardSecret\":\"disposable-body-secret\",\"unknown\":{\"nested\":true}}",
+  "isBase64Encoded": false
+}

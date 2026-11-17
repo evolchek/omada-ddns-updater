@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Authenticated Omada DDNS updater (dry-run by default)
+
+Parameters:
+  HostedZoneId:
+    Type: String
+    AllowedPattern: 'Z[A-Z0-9]+'
+    Description: Verified public hosted zone ID (without /hostedzone/)
+  RecordName:
+    Type: String
+    MaxLength: 253
+    AllowedPattern: '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+'
+    Description: DNS A record to manage, lowercase with no trailing dot (for example vpn.example.com)
+  WebhookSecretArn:
+    Type: String
+    AllowedPattern: 'arn:[^:]+:secretsmanager:ca-central-1:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+'
+    Description: Existing Secrets Manager secret ARN; JSON field token holds rotated webhook secret
+  DryRun:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  LogLevel:
+    Type: String
+    Default: info
+    AllowedValues: [debug, info, warn, error]
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/omada-ddns-updater
+      RetentionInDays: 7
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteDiagnosticLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogGroup.Arn
+        - PolicyName: UpdateOnlyVpnRecord
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: route53:ListResourceRecordSets
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}'
+              - Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}'
+                Condition:
+                  ForAllValues:StringEquals:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames: [!Ref RecordName]
+                    route53:ChangeResourceRecordSetsRecordTypes: ['A']
+                    route53:ChangeResourceRecordSetsActions: ['UPSERT']
+
+  DiagnosticFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: omada-ddns-updater
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Handler: bootstrap
+      CodeUri: build/function.zip
+      Role: !GetAtt ExecutionRole.Arn
+      Timeout: 20
+      MemorySize: 128
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          OMADA_WEBHOOK_SECRET: !Sub '{{resolve:secretsmanager:${WebhookSecretArn}:SecretString:token}}'
+          ROUTE53_HOSTED_ZONE_ID: !Ref HostedZoneId
+          ROUTE53_RECORD_NAME: !Ref RecordName
+          DDNS_DRY_RUN: !Ref DryRun
+          LOG_LEVEL: !Ref LogLevel
+      LoggingConfig:
+        LogFormat: Text
+        LogGroup: !Ref LogGroup
+
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt DiagnosticFunction.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  PublicUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DiagnosticFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  PublicInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DiagnosticFunction
+      Action: lambda:InvokeFunction
+      Principal: '*'
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  FunctionUrl:
+    Value: !GetAtt FunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref DiagnosticFunction
+  LogGroupName:
+    Value: !Ref LogGroup
