@@ -59,6 +59,9 @@ func (h *Handler) log(kind, reason string, fields map[string]any) {
 	case "authentication_failed", "request_rejected":
 		level = slog.LevelWarn
 	}
+	if reason == "invalid_source_ip" {
+		level = slog.LevelWarn
+	}
 	h.logAt(level, kind, reason, fields)
 }
 
@@ -220,7 +223,10 @@ func (h *Handler) selectCandidate(raw, body []byte, messages []string, sourceIP 
 		if !diagnostic {
 			h.diagnostic(raw, body, "invalid_source_ip")
 		}
-		h.log("ddns_skipped", "invalid_source_ip", nil)
+		h.log("ddns_skipped", "invalid_source_ip", map[string]any{
+			"source_ip": scrub(sourceIP, []string{h.cfg.Secret}),
+			"event_ips": eventIPs(messages),
+		})
 		return netip.Addr{}, false
 	}
 	if len(h.matchingCandidates(messages, source)) != 1 {
@@ -231,6 +237,20 @@ func (h *Handler) selectCandidate(raw, body []byte, messages []string, sourceIP 
 		return netip.Addr{}, false
 	}
 	return source, true
+}
+
+func eventIPs(messages []string) []string {
+	ips := []string{}
+	seen := map[netip.Addr]bool{}
+	for _, message := range messages {
+		for _, ip := range Extract(message) {
+			if !seen[ip] {
+				ips = append(ips, ip.String())
+				seen[ip] = true
+			}
+		}
+	}
+	return ips
 }
 
 func (h *Handler) matchingCandidates(messages []string, source netip.Addr) map[netip.Addr]bool {

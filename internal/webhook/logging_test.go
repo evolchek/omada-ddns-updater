@@ -5,9 +5,49 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestInvalidSourceWarning(t *testing.T) {
+	for _, source := range []string{"", "invalid-ip", "192.168.0.1", "2001:4860:4860::8888", testSecret} {
+		t.Run(source, func(t *testing.T) {
+			var logs bytes.Buffer
+			dns := &fakeDNS{}
+			h := New(&logs, Config{Secret: testSecret, HostedZoneID: "ZONE", RecordName: "vpn.example.com", LogLevel: "warn"}, dns)
+			messages := []string{"IP-Address=" + testIP, "IP-Address=8.8.8.8 IP-Address=" + testIP}
+			res, err := h.Handle(context.Background(), event(payload(messages), source, testSecret, "POST", false))
+			if err != nil || res.StatusCode != 200 || dns.reads != 0 || dns.writes != 0 {
+				t.Fatal("invalid source changed request handling")
+			}
+			entries := logEntries(t, logs.Bytes())
+			if len(entries) != 1 {
+				t.Fatal("expected one warning")
+			}
+			entry := entries[0]
+			if entry["level"] != "WARN" || entry["type"] != "ddns_skipped" || entry["reason"] != "invalid_source_ip" {
+				t.Fatal("missing invalid-source warning")
+			}
+			expectedSource := source
+			if source == testSecret {
+				expectedSource = redactedValue
+			}
+			if entry["source_ip"] != expectedSource || !reflect.DeepEqual(entry["event_ips"], []any{testIP, "8.8.8.8"}) {
+				t.Fatal("warning does not contain source and deduplicated event IPs")
+			}
+			if strings.Contains(logs.String(), testSecret) {
+				t.Fatal("secret leaked")
+			}
+		})
+	}
+}
+
+func TestEventIPsWithoutAddresses(t *testing.T) {
+	if got := eventIPs([]string{"no address", "IP-Address=invalid"}); got == nil || len(got) != 0 {
+		t.Fatal("expected an empty array for messages without parsed addresses")
+	}
+}
 
 func logEntries(t *testing.T, data []byte) []map[string]any {
 	t.Helper()
