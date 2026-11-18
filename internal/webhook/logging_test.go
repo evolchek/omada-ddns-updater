@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
+	"omada-ddns-updater/internal/digest"
 	"reflect"
 	"strings"
 	"testing"
@@ -165,5 +167,32 @@ func TestRequestPreservationAndSecretScrubbing(t *testing.T) {
 	body := clean["body"].(map[string]any)
 	if body["unknown"] != "visible" || body["copy"] != redactedValue || !strings.Contains(body["text"].(string), "IP-Address=9.9.9.9") {
 		t.Fatal("body sanitization failed")
+	}
+}
+
+func TestNumericLogLevels(t *testing.T) {
+	for _, tc := range []struct {
+		level slog.Level
+		text  string
+	}{
+		{slog.LevelDebug, "DEBUG"}, {slog.LevelInfo, "INFO"},
+		{slog.LevelWarn, "WARN"}, {slog.LevelError, "ERROR"},
+		{slog.LevelError + 4, "ERROR+4"},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			var logs bytes.Buffer
+			h := New(&logs, Config{RecordName: "vpn.example.com", LogLevel: "debug"}, &fakeDNS{})
+			h.logAt(tc.level, "test_event", "", nil)
+			entries := logEntries(t, logs.Bytes())
+			if len(entries) != 1 || entries[0]["level"] != tc.text || entries[0]["level_num"] != float64(tc.level) {
+				t.Fatalf("incorrect severity fields: %+v", entries)
+			}
+			if !digest.Matches(logs.String()) && tc.level > slog.LevelInfo {
+				t.Fatal("digest did not include emitted high severity record")
+			}
+			if digest.Matches(logs.String()) && tc.level <= slog.LevelInfo {
+				t.Fatal("digest included emitted low severity record")
+			}
+		})
 	}
 }

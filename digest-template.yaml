@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Independent daily Omada DDNS log digest (deploy in the same region as the updater)
+Parameters:
+  SesConfigurationSet:
+    Type: String
+    Default: ''
+    AllowedPattern: '[A-Za-z0-9_-]*'
+    MaxLength: 64
+    Description: Existing default configuration set on the SES sender identity; empty if none (IAM permission only)
+  DigestScheduleExpression:
+    Type: String
+    Default: cron(0 9 * * ? *)
+    MinLength: 1
+    Description: EventBridge Scheduler expression evaluated in DigestTimezone
+  DigestTimezone:
+    Type: String
+    Default: America/Toronto
+    MinLength: 1
+    Description: IANA timezone for the reporting calendar and schedule
+  DigestSender:
+    Type: String
+    AllowedPattern: '[^\s@]+@[^\s@]+'
+    Description: Sender email address covered by the verified SES identity
+  DigestRecipient:
+    Type: String
+    AllowedPattern: '[^\s@]+@[^\s@]+'
+    Description: Recipient email address (must also be verified while SES is in sandbox)
+  SesIdentity:
+    Type: String
+    MinLength: 1
+    AllowedPattern: '[A-Za-z0-9@._+\-]+'
+    Description: Verified SES domain or email identity in this account and region (name, not ARN)
+Conditions:
+  HasSesConfigurationSet: !Not [!Equals [!Ref SesConfigurationSet, '']]
+Resources:
+  DigestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/omada-ddns-digest
+      RetentionInDays: 14
+  DigestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DigestOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/omada-ddns-updater:*'
+              - Effect: Allow
+                Action: ses:SendEmail
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesIdentity}'
+                  # SES can also authorize the verified recipient identity in sandbox mode.
+                  - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${DigestRecipient}'
+                  - !If
+                    - HasSesConfigurationSet
+                    - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${SesConfigurationSet}'
+                    - !Ref AWS::NoValue
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: !Ref DigestSender
+                  ForAllValues:StringEquals:
+                    ses:Recipients: [!Ref DigestRecipient]
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt DigestLogGroup.Arn
+  DigestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: omada-ddns-digest
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Handler: bootstrap
+      CodeUri: build/digest/function.zip
+      Role: !GetAtt DigestRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          DIGEST_SENDER: !Ref DigestSender
+          DIGEST_RECIPIENT: !Ref DigestRecipient
+          DIGEST_LOG_GROUP: /aws/lambda/omada-ddns-updater
+          DIGEST_TIMEZONE: !Ref DigestTimezone
+      LoggingConfig:
+        LogFormat: Text
+        LogGroup: !Ref DigestLogGroup
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default'
+      Policies:
+        - PolicyName: InvokeDigestOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DigestFunction.Arn
+  DailySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: omada-ddns-digest-daily
+      GroupName: default
+      ScheduleExpression: !Ref DigestScheduleExpression
+      ScheduleExpressionTimezone: !Ref DigestTimezone
+      FlexibleTimeWindow: {Mode: 'OFF'}
+      Target:
+        Arn: !GetAtt DigestFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{}'
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 0
+Outputs:
+  DigestFunctionArn:
+    Value: !GetAtt DigestFunction.Arn

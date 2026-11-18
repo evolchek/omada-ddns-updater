@@ -70,6 +70,7 @@ func (h *Handler) logAt(level slog.Level, kind, reason string, fields map[string
 		fields = map[string]any{}
 	}
 	fields["type"] = kind
+	fields["level_num"] = int(level)
 	if reason != "" {
 		fields["reason"] = reason
 	}

@@ -27,3 +27,17 @@ local:
 clean:
 	go clean
 	$(RM) -r build .aws-sam
+
+.PHONY: build-digest package-digest deploy-digest
+build-digest:
+	mkdir -p build/digest
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -tags lambda.norpc -o build/digest/bootstrap ./cmd/omada-ddns-digest
+	chmod 755 build/digest/bootstrap
+
+package-digest: build-digest
+	cd build/digest && zip -j function.zip bootstrap
+
+# Invoke only after explicit deployment approval.
+# Digest deployment parameters come from the digest environment in samconfig.toml.
+deploy-digest: test package-digest
+	sam deploy --config-env digest --confirm-changeset --no-fail-on-empty-changeset
